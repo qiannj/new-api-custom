@@ -111,12 +111,6 @@ func (a *Adaptor) ConvertEmbeddingRequest(c *gin.Context, info *relaycommon.Rela
 }
 
 func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
-	if len(request.Tools) > 0 {
-		request.Tools = ConvertToolsRaw(request.Tools)
-	}
-	if len(request.ToolChoice) > 0 {
-		request.ToolChoice = ConvertToolChoiceRaw(request.ToolChoice)
-	}
 	if info != nil && info.ChannelSetting.SystemPrompt != "" {
 		systemPrompt := info.ChannelSetting.SystemPrompt
 		if len(request.Instructions) == 0 {
