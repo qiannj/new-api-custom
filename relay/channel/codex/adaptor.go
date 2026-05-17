@@ -41,7 +41,67 @@ func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
 }
 
 func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeneralOpenAIRequest) (any, error) {
-	return nil, errors.New("codex channel: /v1/chat/completions endpoint not supported")
+	messages := make([]ChatMessage, 0, len(request.Messages))
+	for _, msg := range request.Messages {
+		cm := ChatMessage{
+			Role:    msg.Role,
+			Content: msg.Content,
+		}
+		if msg.ToolCallID != "" {
+			cm.ToolCallID = msg.ToolCallID
+		}
+		if msg.ToolCalls != nil {
+			tcs, err := json.Marshal(msg.ToolCalls)
+			if err == nil {
+				json.Unmarshal(tcs, &cm.ToolCalls)
+			}
+		}
+		if msg.Name != "" {
+			cm.Name = msg.Name
+		}
+		messages = append(messages, cm)
+	}
+
+	converted := ConvertMessages(messages)
+
+	respBody := map[string]interface{}{
+		"model":  request.Model,
+		"input":  converted.Items,
+		"stream": true,
+	}
+
+	if converted.Instructions != "" {
+		respBody["instructions"] = converted.Instructions
+	}
+	if request.MaxTokens > 0 {
+		respBody["max_output_tokens"] = request.MaxTokens
+	}
+	if request.Temperature != nil {
+		respBody["temperature"] = *request.Temperature
+	}
+	if request.TopP != nil {
+		respBody["top_p"] = *request.TopP
+	}
+	if request.Stop != nil {
+		respBody["stop"] = request.Stop
+	}
+
+	if len(request.Tools) > 0 {
+		toolsJSON, err := json.Marshal(request.Tools)
+		if err == nil {
+			respBody["tools"] = ConvertToolsRaw(toolsJSON)
+		}
+	}
+	if request.ToolChoice != "" || request.ToolChoiceObj != nil {
+		tcJSON, err := json.Marshal(request.ToolChoice)
+		if err == nil {
+			respBody["tool_choice"] = ConvertToolChoiceRaw(tcJSON)
+		}
+	}
+
+	respBody["store"] = false
+
+	return json.Marshal(respBody)
 }
 
 func (a *Adaptor) ConvertRerankRequest(c *gin.Context, relayMode int, request dto.RerankRequest) (any, error) {
@@ -53,9 +113,6 @@ func (a *Adaptor) ConvertEmbeddingRequest(c *gin.Context, info *relaycommon.Rela
 }
 
 func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
-	isCompact := info != nil && info.RelayMode == relayconstant.RelayModeResponsesCompact
-
-	// Convert tools and tool_choice from Chat format (with function wrapper) to Responses format if present
 	if len(request.Tools) > 0 {
 		request.Tools = ConvertToolsRaw(request.Tools)
 	}
@@ -65,7 +122,6 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 
 	if info != nil && info.ChannelSetting.SystemPrompt != "" {
 		systemPrompt := info.ChannelSetting.SystemPrompt
-
 		if len(request.Instructions) == 0 {
 			if b, err := common.Marshal(systemPrompt); err == nil {
 				request.Instructions = b
@@ -89,27 +145,13 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 						return nil, err
 					}
 				}
-			} else {
-				if b, err := common.Marshal(systemPrompt); err == nil {
-					request.Instructions = b
-				} else {
-					return nil, err
-				}
 			}
 		}
 	}
-	// Codex backend requires the `instructions` field to be present.
-	// Keep it consistent with Codex CLI behavior by defaulting to an empty string.
 	if len(request.Instructions) == 0 {
 		request.Instructions = json.RawMessage(`""`)
 	}
-
-	if isCompact {
-		return request, nil
-	}
-	// codex: store must be false
 	request.Store = json.RawMessage("false")
-	// rm max_output_tokens
 	request.MaxOutputTokens = nil
 	request.Temperature = nil
 	return request, nil
@@ -120,18 +162,23 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 }
 
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {
-	if info.RelayMode != relayconstant.RelayModeResponses && info.RelayMode != relayconstant.RelayModeResponsesCompact {
-		return nil, types.NewError(errors.New("codex channel: endpoint not supported"), types.ErrorCodeInvalidRequest)
-	}
-
 	if info.RelayMode == relayconstant.RelayModeResponsesCompact {
 		return openai.OaiResponsesCompactionHandler(c, resp)
 	}
-
-	if info.IsStream {
-		return openai.OaiResponsesStreamHandler(c, info, resp)
+	if info.RelayMode == relayconstant.RelayModeResponses {
+		if info.IsStream {
+			return openai.OaiResponsesStreamHandler(c, info, resp)
+		}
+		return openai.OaiResponsesHandler(c, info, resp)
 	}
-	return openai.OaiResponsesHandler(c, info, resp)
+	if info.RelayMode == relayconstant.RelayModeChatCompletions {
+		if info.IsStream {
+			err = StreamTranslate(resp.Body, c.Writer, info.UpstreamModelName)
+			return nil, err
+		}
+		return AggregateResponse(resp.Body)
+	}
+	return nil, types.NewError(errors.New("codex channel: endpoint not supported"), types.ErrorCodeInvalidRequest)
 }
 
 func (a *Adaptor) GetModelList() []string {
@@ -143,8 +190,8 @@ func (a *Adaptor) GetChannelName() string {
 }
 
 func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
-	if info.RelayMode != relayconstant.RelayModeResponses && info.RelayMode != relayconstant.RelayModeResponsesCompact {
-		return "", errors.New("codex channel: only /v1/responses and /v1/responses/compact are supported")
+	if info.RelayMode != relayconstant.RelayModeResponses && info.RelayMode != relayconstant.RelayModeResponsesCompact && info.RelayMode != relayconstant.RelayModeChatCompletions {
+		return "", errors.New("codex channel: only /v1/responses and /v1/chat/completions are supported")
 	}
 	path := "/backend-api/codex/responses"
 	if info.RelayMode == relayconstant.RelayModeResponsesCompact {
@@ -186,9 +233,6 @@ func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *rel
 		req.Set("originator", "codex_cli_rs")
 	}
 
-	// chatgpt.com/backend-api/codex/responses is strict about Content-Type.
-	// Clients may omit it or include parameters like `application/json; charset=utf-8`,
-	// which can be rejected by the upstream. Force the exact media type.
 	req.Set("Content-Type", "application/json")
 	if info.IsStream {
 		req.Set("Accept", "text/event-stream")
