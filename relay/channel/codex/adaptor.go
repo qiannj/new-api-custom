@@ -3,6 +3,7 @@
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -45,10 +46,10 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 	for _, msg := range request.Messages {
 		cm := ChatMessage{
 			Role:    msg.Role,
-			Content: msg.Content,
+			Content: fmt.Sprint(msg.Content),
 		}
-		if msg.ToolCallID != "" {
-			cm.ToolCallID = msg.ToolCallID
+		if msg.ToolCallId != "" {
+			cm.ToolCallID = msg.ToolCallId
 		}
 		if msg.ToolCalls != nil {
 			tcs, err := json.Marshal(msg.ToolCalls)
@@ -56,8 +57,8 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 				json.Unmarshal(tcs, &cm.ToolCalls)
 			}
 		}
-		if msg.Name != "" {
-			cm.Name = msg.Name
+		if msg.Name != nil {
+			cm.Name = *msg.Name
 		}
 		messages = append(messages, cm)
 	}
@@ -73,8 +74,8 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 	if converted.Instructions != "" {
 		respBody["instructions"] = converted.Instructions
 	}
-	if request.MaxTokens > 0 {
-		respBody["max_output_tokens"] = request.MaxTokens
+	if request.MaxTokens != nil {
+		respBody["max_output_tokens"] = *request.MaxTokens
 	}
 	if request.Temperature != nil {
 		respBody["temperature"] = *request.Temperature
@@ -85,22 +86,19 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 	if request.Stop != nil {
 		respBody["stop"] = request.Stop
 	}
-
 	if len(request.Tools) > 0 {
 		toolsJSON, err := json.Marshal(request.Tools)
 		if err == nil {
 			respBody["tools"] = ConvertToolsRaw(toolsJSON)
 		}
 	}
-	if request.ToolChoice != "" || request.ToolChoiceObj != nil {
+	if request.ToolChoice != "" {
 		tcJSON, err := json.Marshal(request.ToolChoice)
 		if err == nil {
 			respBody["tool_choice"] = ConvertToolChoiceRaw(tcJSON)
 		}
 	}
-
 	respBody["store"] = false
-
 	return json.Marshal(respBody)
 }
 
@@ -119,7 +117,6 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 	if len(request.ToolChoice) > 0 {
 		request.ToolChoice = ConvertToolChoiceRaw(request.ToolChoice)
 	}
-
 	if info != nil && info.ChannelSetting.SystemPrompt != "" {
 		systemPrompt := info.ChannelSetting.SystemPrompt
 		if len(request.Instructions) == 0 {
@@ -173,10 +170,16 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 	}
 	if info.RelayMode == relayconstant.RelayModeChatCompletions {
 		if info.IsStream {
-			err = StreamTranslate(resp.Body, c.Writer, info.UpstreamModelName)
-			return nil, err
+			if sErr := StreamTranslate(resp.Body, c.Writer, info.UpstreamModelName); sErr != nil {
+				return nil, types.NewError(sErr, types.ErrorCodeInternalError)
+			}
+			return nil, nil
 		}
-		return AggregateResponse(resp.Body)
+		result, aErr := AggregateResponse(resp.Body)
+		if aErr != nil {
+			return nil, types.NewError(aErr, types.ErrorCodeInternalError)
+		}
+		return result, nil
 	}
 	return nil, types.NewError(errors.New("codex channel: endpoint not supported"), types.ErrorCodeInvalidRequest)
 }
@@ -202,43 +205,35 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 
 func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *relaycommon.RelayInfo) error {
 	channel.SetupApiRequestHeader(info, c, req)
-
 	key := strings.TrimSpace(info.ApiKey)
 	if !strings.HasPrefix(key, "{") {
 		return errors.New("codex channel: key must be a JSON object")
 	}
-
 	oauthKey, err := ParseOAuthKey(key)
 	if err != nil {
 		return err
 	}
-
 	accessToken := strings.TrimSpace(oauthKey.AccessToken)
 	accountID := strings.TrimSpace(oauthKey.AccountID)
-
 	if accessToken == "" {
 		return errors.New("codex channel: access_token is required")
 	}
 	if accountID == "" {
 		return errors.New("codex channel: account_id is required")
 	}
-
 	req.Set("Authorization", "Bearer "+accessToken)
 	req.Set("chatgpt-account-id", accountID)
-
 	if req.Get("OpenAI-Beta") == "" {
 		req.Set("OpenAI-Beta", "responses=experimental")
 	}
 	if req.Get("originator") == "" {
 		req.Set("originator", "codex_cli_rs")
 	}
-
 	req.Set("Content-Type", "application/json")
 	if info.IsStream {
 		req.Set("Accept", "text/event-stream")
 	} else if req.Get("Accept") == "" {
 		req.Set("Accept", "application/json")
 	}
-
 	return nil
 }
