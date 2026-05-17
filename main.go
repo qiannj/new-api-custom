@@ -185,8 +185,8 @@ func main() {
 	})
 	server.Use(sessions.Sessions("session", store))
 
-	InjectUmamiAnalytics()
-	InjectGoogleAnalytics()
+	//InjectUmamiAnalytics()
+	//InjectGoogleAnalytics()
 
 	// ????
 	router.SetRouter(server, router.ThemeAssets{
