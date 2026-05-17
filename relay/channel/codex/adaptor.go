@@ -171,13 +171,13 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 	if info.RelayMode == relayconstant.RelayModeChatCompletions {
 		if info.IsStream {
 			if sErr := StreamTranslate(resp.Body, c.Writer, info.UpstreamModelName); sErr != nil {
-				return nil, types.NewError(sErr, types.ErrorCodeUnknownError)
+				return nil, types.NewError(sErr, types.ErrorCodeBadResponse)
 			}
 			return nil, nil
 		}
 		result, aErr := AggregateResponse(resp.Body)
 		if aErr != nil {
-			return nil, types.NewError(aErr, types.ErrorCodeUnknownError)
+			return nil, types.NewError(aErr, types.ErrorCodeBadResponse)
 		}
 		return result, nil
 	}
