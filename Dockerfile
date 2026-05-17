@@ -1,5 +1,4 @@
-﻿FROM oven/bun:1 AS builder
-
+FROM oven/bun:1 AS builder
 WORKDIR /build
 COPY web/default/package.json .
 COPY web/default/bun.lock .
@@ -20,10 +19,7 @@ COPY --from=builder /build/dist ./web/default/dist
 RUN go build -ldflags "-s -w -X github.com/QuantumNous/new-api/common.Version=$(cat VERSION)" -o new-api
 
 FROM debian:bookworm-slim
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates tzdata \
-    && rm -rf /var/lib/apt/lists/* \
-    && update-ca-certificates
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata && rm -rf /var/lib/apt/lists/* && update-ca-certificates
 COPY --from=builder2 /build/new-api /
 COPY LICENSE NOTICE THIRD-PARTY-LICENSES.md /licenses/
 EXPOSE 3000
