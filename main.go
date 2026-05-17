@@ -42,7 +42,7 @@ var buildFS embed.FS
 var indexPage []byte
 
 
-var _ embed.FS // classicBuildFS removed
+// classic removed // classicBuildFS removed
 
 /index.html
 
